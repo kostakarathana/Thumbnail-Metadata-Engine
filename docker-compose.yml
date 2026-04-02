@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+  # ── The "Kitchen Spindle" ──────────────────────────────────────────
+  # Redis acts as the task broker: the API pins orders here,
+  # and the worker pulls them off one-by-one.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── The "Recipe Book" ──────────────────────────────────────────────
+  # Postgres stores structured metadata (image dimensions, detected
+  # objects, timestamps). The actual image bytes live on disk.
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline_secret
+      POSTGRES_DB: thumbnail_engine
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-ARGS", "pg_isready", "-U", "pipeline"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── The "Waiter" (API) ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/code/app          # hot-reload during dev
+      - ./media:/code/media      # processed images land here
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://pipeline:pipeline_secret@postgres:5432/thumbnail_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ── The "Chef" (Worker) ────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m app.worker
+    volumes:
+      - ./app:/code/app
+      - ./media:/code/media
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://pipeline:pipeline_secret@postgres:5432/thumbnail_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  pg_data:
